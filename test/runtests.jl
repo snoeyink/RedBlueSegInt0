@@ -90,23 +90,35 @@ const RBVector2d = RedBlueSegInt0.Vector2d
 	end
 
 	@testset "Active structure placeholders" begin
-		s = SimpleVectorStructure()
 		seg_a = Segment(Point(0, 0), Point(2, 0), :blue)
 		seg_b = Segment(Point(0, 1), Point(2, 1), :blue)
 		seg_c = Segment(Point(0, 2), Point(2, 2), :blue)
+		s = SimpleVectorStructure([ seg_a, seg_b, seg_c])
 
-		insert!(s, seg_a, 0.0)
-		insert!(s, seg_b, 0.0)
-		insert!(s, seg_c, 0.0)
-		@test length(s.segments) == 3
+        @test length(s.segments) == 4
+
+        s.insert!(seg_b, 1.0)
+        s.insert!(seg_a, 1.0)
+        s.insert!(seg_c, 1.0)
+
+		@test length(s.segments) == 7
 
 		above, below = find_neighbors(s, seg_b)
 		@test above == seg_c
 		@test below == seg_a
 
+        above,below = find_neighbors(s, seg_a)
+        @test above == seg_b
+        @test is_sentinel(below)
+		
 		delete!(s, seg_b, 1.0)
-		@test length(s.segments) == 2
-		@test find_neighbors(s, seg_b) == (nothing, nothing)
+		@test length(s.segments) == 6
+        above,below = find_neighbors(s, seg_a)
+        @test above == seg_c
+        @test is_sentinel(below)
+
+		@test_throws ArgumentError find_neighbors(s, seg_b)
+		@test_throws ArgumentError delete!(below, 1.0)
 
 		@test reorder!(s, Point(1, 1)) === s
 	end

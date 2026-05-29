@@ -5,7 +5,7 @@ export D, Color, RED, BLUE, MAX_23BIT_INT
 export Point, Vector2d, Segment, Line2d
 export Flag, sort_flags
 export ActiveStructure, SimpleVectorStructure
-export insert!, delete!, find_neighbors, reorder!
+export insert!, delete!, find_neighbors, reorder!, is_sentinel
 export perp, dot, orient, side, line_normal, line_offset, line_value
 export cross, intersect, crossPt
 export random_point, random_noncrossing_segments, random_noncrossing_segments_rej, random_polyline
@@ -19,8 +19,8 @@ const BLUE::Color = :blue
 const VALID_COLORS = (RED, BLUE)
 
 # Keep coordinates in a range where integer products remain exact in Float64.
-const MAX_23BIT_INT = 2.0^23 - 1.0
-const MAX_23BIT_INT_I = Int(MAX_23BIT_INT)
+const MAX_23BIT_INT = 2.0^23 
+const MAX_23BIT_INT_I = Int(MAX_23BIT_INT)-1
 
 function _check_coord_23bit_integer(v::Float64, name::Symbol)
 	@static if D
@@ -63,6 +63,23 @@ end
 
 Vector2d(t::NTuple{2,<:Real}) = Vector2d(t[1], t[2])
 
+Base.:-(p::Point, q::Point) = Vector2d(p.x - q.x, p.y - q.y)
+Base.:+(p::Point, v::Vector2d) = Point(p.x + v.x, p.y + v.y)
+Base.:-(p::Point, v::Vector2d) = Point(p.x - v.x, p.y - v.y)
+Base.:+(u::Vector2d, v::Vector2d) = Vector2d(u.x + v.x, u.y + v.y)
+Base.:-(u::Vector2d, v::Vector2d) = Vector2d(u.x - v.x, u.y - v.y)
+Base.:-(pxy::NTuple{2,<:Real}, p::Point) = Point(pxy) - p
+Base.:+(p::Point, vxy::NTuple{2,<:Real}) = p + Vector2d(vxy)
+Base.:(==)(p::Point, q::Point) = p.x == q.x && p.y == q.y
+Base.:(==)(u::Vector2d, v::Vector2d) = u.x == v.x && u.y == v.y
+
+perp(v::Vector2d) = Vector2d(-v.y, v.x)
+dot(u::Vector2d, v::Vector2d) = muladd(u.x, v.x, u.y * v.y)
+
+orient(p::Point, q::Point, r::Point) = dot(perp(q - p), r - p)
+
+const ORIGIN_POINT = Point(0, 0)
+
 struct Segment
 	p::Point
 	q::Point
@@ -81,22 +98,6 @@ end
 Segment(px::Real, py::Real, qx::Real, qy::Real, color::Color, reversed::Bool = false) =
 	Segment(Point(px, py), Point(qx, qy), color, reversed)
 
-Base.:-(p::Point, q::Point) = Vector2d(p.x - q.x, p.y - q.y)
-Base.:+(p::Point, v::Vector2d) = Point(p.x + v.x, p.y + v.y)
-Base.:-(p::Point, v::Vector2d) = Point(p.x - v.x, p.y - v.y)
-Base.:+(u::Vector2d, v::Vector2d) = Vector2d(u.x + v.x, u.y + v.y)
-Base.:-(u::Vector2d, v::Vector2d) = Vector2d(u.x - v.x, u.y - v.y)
-Base.:-(pxy::NTuple{2,<:Real}, p::Point) = Point(pxy) - p
-Base.:+(p::Point, vxy::NTuple{2,<:Real}) = p + Vector2d(vxy)
-Base.:(==)(p::Point, q::Point) = p.x == q.x && p.y == q.y
-Base.:(==)(u::Vector2d, v::Vector2d) = u.x == v.x && u.y == v.y
-
-perp(v::Vector2d) = Vector2d(-v.y, v.x)
-dot(u::Vector2d, v::Vector2d) = muladd(u.x, v.x, u.y * v.y)
-
-orient(p::Point, q::Point, r::Point) = dot(perp(q - p), r - p)
-
-const ORIGIN_POINT = Point(0, 0)
 
 line_normal(s::Segment) = perp(s.q - s.p)
 line_offset(s::Segment, o::Point = ORIGIN_POINT) = dot(perp(s.p - o), s.q - o)
@@ -123,17 +124,77 @@ intersect(s::Segment, t::Segment) =
 struct Line2d
 	w::Float64
 	n::Vector2d
+    Line2d(w::Real, n::Vector2d) = new(Float64(w), n)
 end
+Line2d(s::Segment) = Line2d(line_offset(s), line_normal(s))
 
 struct Flag
 	segment::Segment
 	start::Bool
+    line::Line2d
+    function Flag(segment::Segment, start::Bool)
+        return new(segment, start, Line2d(segment))
+    end
 end
+
 
 abstract type ActiveStructure end
 
 struct SimpleVectorStructure <: ActiveStructure
 	segments::Vector{Segment}
+	bbox::Tuple{Point, Point}
+end
+
+function _segment_y_at_x(s::Segment, x::Real)
+	if s.p.x == s.q.x
+		return min(s.p.y, s.q.y)
+	end
+	t = (Float64(x) - s.p.x) / (s.q.x - s.p.x)
+	return s.p.y + t * (s.q.y - s.p.y)
+end
+
+function _segment_lt_at_x(a::Segment, b::Segment, x::Real)
+	ay = _segment_y_at_x(a, x)
+	by = _segment_y_at_x(b, x)
+	ay < by && return true
+	ay > by && return false
+	return _segment_slope_cmp(a, b) < 0
+end
+
+function is_sentinel(structure::SimpleVectorStructure, segment::Segment)
+	return segment.p.x < -MAX_23BIT_INT_I
+end
+
+function _bounding_box(segments::Vector{Segment})
+	if isempty(segments)
+		return (Point(-1, -1), Point(1, 1))
+	end
+	xmin = minimum(min(s.p.x, s.q.x) for s in segments)
+	xmax = maximum(max(s.p.x, s.q.x) for s in segments)
+	ymin = minimum(min(s.p.y, s.q.y) for s in segments)
+	ymax = maximum(max(s.p.y, s.q.y) for s in segments)
+	return (Point(xmin, ymin), Point(xmax, ymax))
+end
+
+function _sentinel_segments(bbox::Tuple{Point, Point})::Segment[]
+	lo, hi = bbox
+	xmin = -MAX_23BIT_INT_I - 1 # Sentinels have x-coordinates outside the valid range. 
+	xmax =  MAX_23BIT_INT_I + 1
+	ymin = max(lo.y , -MAX_23BIT_INT_I)- 1
+	ymax = min(hi.y , MAX_23BIT_INT_I)+ 1
+
+	lower_red = Segment(Point(xmin, ymin), Point(xmax, ymin), RED)
+	lower_blue = Segment(Point(xmin, ymin), Point(xmax, ymin), BLUE)
+	upper_red = Segment(Point(xmin, ymax), Point(xmax, ymax), RED)
+	upper_blue = Segment(Point(xmin, ymax), Point(xmax, ymax), BLUE)
+	return [lower_red, lower_blue, upper_red, upper_blue]
+end
+
+
+function SimpleVectorStructure(segments::Vector{Segment})
+	 bbox = _bounding_box(segments)
+     sentinels = _sentinel_segments(bbox)
+	return SimpleVectorStructure(sentinels, bbox)
 end
 
 SimpleVectorStructure() = SimpleVectorStructure(Segment[])
@@ -155,26 +216,30 @@ function reorder!(structure::ActiveStructure, event_point::Point)
 end
 
 function insert!(structure::SimpleVectorStructure, segment::Segment, x_coord::Real)
-	push!(structure.segments, segment)
+	_is_sentinel(structure, segment) && throw(ArgumentError("cannot insert sentinel segments"))
+	idx = searchsortedfirst(structure.segments, segment; lt = (a, b) -> _segment_lt_at_x(a, b, x_coord))
+	insert!(structure.segments, idx, segment)
 	return structure
 end
 
 function delete!(structure::SimpleVectorStructure, segment::Segment, x_coord::Real)
+	_is_sentinel(structure, segment) && throw(ArgumentError("cannot delete sentinel segments"))
 	idx = findfirst(==(segment), structure.segments)
 	idx === nothing || deleteat!(structure.segments, idx)
 	return structure
 end
 
 function find_neighbors(structure::SimpleVectorStructure, segment::Segment)
+	_is_sentinel(structure, segment) && throw(ArgumentError("cannot query sentinel segments"))
 	idx = findfirst(==(segment), structure.segments)
-	idx === nothing && return (nothing, nothing)
-	above = idx < length(structure.segments) ? structure.segments[idx + 1] : nothing
-	below = idx > 1 ? structure.segments[idx - 1] : nothing
+	idx === nothing && throw(ArgumentError("segment is not active in the structure"))
+	above = idx < length(structure.segments) ? structure.segments[idx + 1] : error("missing upper neighbor sentinel")
+	below = idx > 1 ? structure.segments[idx - 1] : error("missing lower neighbor sentinel")
 	return (above, below)
 end
 
 function reorder!(structure::SimpleVectorStructure, event_point::Point)
-	# Placeholder for future event-local reordering logic.
+	sort!(structure.segments, lt = (a, b) -> _segment_lt_at_x(a, b, event_point.x))
 	return structure
 end
 
